@@ -1,25 +1,32 @@
 import json
-from datetime import datetime, date, time
+import unittest
 
+from django import VERSION
 from django.conf import settings
-from django.core.urlresolvers import reverse
-from django.test.client import Client, MULTIPART_CONTENT
-from django.test import TestCase
+from django.contrib.auth import SESSION_KEY, get_user_model
 from django.contrib.auth.models import User
-from django.contrib.auth import get_user_model
-from django.core import mail
-from django.test.utils import override_settings
+from django.contrib.auth.tokens import default_token_generator
 from django.contrib.sites.models import Site
+from django.core import mail
+from django.core.urlresolvers import reverse
+from django.test import TestCase
+from django.test.client import Client, MULTIPART_CONTENT
+from django.test.utils import override_settings, modify_settings
+
 
 from allauth.socialaccount.models import SocialApp
 from allauth.socialaccount.providers.facebook.provider import GRAPH_API_URL
 import responses
 
+from rest_auth.views import Login
 from rest_framework import status
+from rest_framework.test import APIRequestFactory, APIClient
+from rest_framework.test import APITestCase
+
+factory = APIRequestFactory()
 
 
-class APIClient(Client):
-
+class APIClientOld(Client):
     def patch(self, path, data='', content_type=MULTIPART_CONTENT, follow=False, **extra):
         return self.generic('PATCH', path, data, content_type, **extra)
 
@@ -28,7 +35,7 @@ class APIClient(Client):
 
 
 # class CustomJSONEncoder(json.JSONEncoder):
-#     """
+# """
 #     Convert datetime/date objects into isoformat
 #     """
 
@@ -39,17 +46,17 @@ class APIClient(Client):
 #             return super(CustomJSONEncoder, self).default(obj)
 
 
-class BaseAPITestCase(object):
-
+class BaseAPITestCase(TestCase):
     """
     base for API tests:
         * easy request calls, f.e.: self.post(url, data), self.get(url)
         * easy status check, f.e.: self.post(url, data, status_code=200)
     """
+
     def send_request(self, request_method, *args, **kwargs):
         request_func = getattr(self.client, request_method)
         status_code = None
-        if not 'content_type' in kwargs and request_method != 'get':
+        if 'content_type' not in kwargs and request_method != 'get':
             kwargs['content_type'] = 'application/json'
         if 'data' in kwargs and request_method != 'get' and kwargs['content_type'] == 'application/json':
             data = kwargs.get('data', '')
@@ -106,7 +113,7 @@ class BaseAPITestCase(object):
 
     def init(self):
         settings.DEBUG = True
-        self.client = APIClient()
+        self.client = APIClientOld()
 
         self.login_url = reverse('rest_login')
         self.logout_url = reverse('rest_logout')
@@ -131,9 +138,282 @@ class BaseAPITestCase(object):
 # -----------------------
 #  T E S T   H E R E
 # -----------------------
+class TestLogin(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.user_credentials = {'username': 'person', 'password': 'person'}
+        self.url = reverse('rest_login')
+
+    def test_empty_login(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_inactive_login(self):
+        user = User.objects.create_user(**self.user_credentials)
+        user.is_active = False
+        user.save()
+
+        response = self.client.post(self.url, self.user_credentials)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_invalid_login(self):
+        response = self.client.post(self.url, self.user_credentials)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_login(self):
+        User.objects.create_user(**self.user_credentials)
+
+        response = self.client.post(self.url, self.user_credentials)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn(SESSION_KEY, self.client.session)
+        self.assertIn('key', response.data)
+
+    @override_settings(REST_SESSION_LOGIN=False)
+    def test_login_without_session(self):
+        User.objects.create_user(**self.user_credentials)
+
+        response = self.client.post(self.url, self.user_credentials)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(SESSION_KEY, self.client.session)
+        self.assertIn('key', response.data)
 
 
-class APITestCase1(TestCase, BaseAPITestCase):
+class TestLogout(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.url = reverse('rest_logout')
+
+        User.objects.create_user('person', 'person@example.com', 'person')
+
+    def test_logout_no_user(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_logout(self):
+        self.client.login(username='person', password='person')
+
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @override_settings(REST_SESSION_LOGIN=False)
+    def test_logout_without_session(self):
+        self.client.login(username='person', password='person')
+
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn(SESSION_KEY, self.client.session)
+
+
+class TestUserDetails(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.user = User.objects.create_user('person')
+        self.url = reverse('rest_user_details')
+
+    def test_anonymous_user_details(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_user_details(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @unittest.skip('Email is not writeable')
+    def test_update_user_details(self):
+        self.client.force_authenticate(user=self.user)
+        response = self.client.patch(self.url, {
+            'first_name': 'John',
+            'last_name': 'Smith',
+            'email': 'person@example.com'
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertTrue(self.user.first_name)
+        self.assertTrue(self.user.last_name)
+        self.assertTrue(self.user.email)
+
+
+class TestPasswordReset(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.user = User.objects.create_user('person', 'person@example.com', 'person')
+        self.url = reverse('rest_password_reset')
+
+    def test_empty_password_reset(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_reset(self):
+        response = self.client.post(self.url, {'email': self.user.email})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_password_reset_with_bad_email(self):
+        response = self.client.post(self.url, {'email': 'bad@example.com'})
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(mail.outbox), 0)
+
+
+class TestPasswordResetConfirm(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.user = User.objects.create_user('person')
+        self.url = reverse('rest_password_reset_confirm')
+
+    def _generate_token_and_uid(self, user=None):
+        if not user:
+            user = self.user
+        token = default_token_generator.make_token(user)
+
+        if VERSION >= (1, 6):
+            from django.utils.encoding import force_bytes
+            from django.utils.http import urlsafe_base64_encode
+
+            return token, urlsafe_base64_encode(force_bytes(user.pk))
+        else:
+            from django.utils.http import int_to_base36
+
+            return token, int_to_base36(user.pk)
+
+    def test_empty_password_reset_confirm(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_reset_confirm(self):
+        token, encoded_uid = self._generate_token_and_uid()
+
+        response = self.client.post(self.url, {
+            'new_password1': 'new_person',
+            'new_password2': 'new_person',
+            'uid': encoded_uid,
+            'token': token,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_password_reset_confirm_mismatched(self):
+        token, encoded_uid = self._generate_token_and_uid()
+
+        response = self.client.post(self.url, {
+            'new_password1': 'new_person1',
+            'new_password2': 'new_person',
+            'uid': encoded_uid,
+            'token': token,
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestPasswordChange(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.user_credentials = {'username': 'person', 'password': 'person'}
+        self.user = User.objects.create_user(**self.user_credentials)
+        self.url = reverse('rest_password_change')
+
+    def test_empty_password_change(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_password_change_mismatched(self):
+        self.client.login(**self.user_credentials)
+        response = self.client.post(self.url, {
+            'new_password1': 'new_person1',
+            'new_password2': 'new_person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_password_change(self):
+        self.client.login(**self.user_credentials)
+        response = self.client.post(self.url, {
+            'new_password1': 'new_person',
+            'new_password2': 'new_person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @override_settings(OLD_PASSWORD_FIELD_ENABLED=True)
+    def test_password_change_with_old_password(self):
+        self.client.login(**self.user_credentials)
+        response = self.client.post(self.url, {
+            'old_password': self.user_credentials['password'],
+            'new_password1': 'new_person',
+            'new_password2': 'new_person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    @override_settings(OLD_PASSWORD_FIELD_ENABLED=True)
+    def test_password_change_with_incorrect_password(self):
+        self.client.login(**self.user_credentials)
+        response = self.client.post(self.url, {
+            'old_password': 'password',
+            'new_password1': 'new_person',
+            'new_password2': 'new_person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+
+class TestRegister(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.url = reverse('rest_register')
+
+    def test_empty_registration(self):
+        response = self.client.post(self.url)
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    def test_registration(self):
+        response = self.client.post(self.url, {
+            'username': 'person',
+            'password1': 'person',
+            'password2': 'person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_existing_registration(self):
+        User.objects.create_user('person', 'person@example.com', 'person')
+
+        response = self.client.post(self.url, {
+            'username': 'person',
+            'password1': 'person',
+            'password2': 'person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    @override_settings(
+        ACCOUNT_EMAIL_VERIFICATION='mandatory',
+        ACCOUNT_EMAIL_REQUIRED=True
+    )
+    def test_registration_with_email_verificaiton(self):
+        response = self.client.post(self.url, {
+            'username': 'person',
+            'email': 'person@example.com',
+            'password1': 'person',
+            'password2': 'person'
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(len(mail.outbox), 1)
+
+
+class TestVerifyEmail(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.url = reverse('rest_verify_email')
+
+
+class TestSocialLogin(APITestCase):
+    urls = 'rest_auth.test_urls'
+
+    def setUp(self):
+        self.url = reverse('fb_login')
+
+
+class APITestCase1(BaseAPITestCase):
     """
     Case #1:
     - user profile: defined
@@ -174,11 +454,14 @@ class APITestCase1(TestCase, BaseAPITestCase):
         from django.utils.encoding import force_bytes
         from django.contrib.auth.tokens import default_token_generator
         from django import VERSION
+
         if VERSION[1] == 5:
             from django.utils.http import int_to_base36
+
             result['uid'] = int_to_base36(user.pk)
         else:
             from django.utils.http import urlsafe_base64_encode
+
             result['uid'] = urlsafe_base64_encode(force_bytes(user.pk))
         result['token'] = default_token_generator.make_token(user)
         return result
@@ -231,7 +514,7 @@ class APITestCase1(TestCase, BaseAPITestCase):
             "new_password2": "new_person"
         }
         self.post(self.password_change_url, data=new_password_payload,
-            status_code=200)
+                  status_code=200)
 
         # user should not be able to login using old password
         self.post(self.login_url, data=login_payload, status_code=400)
@@ -246,7 +529,7 @@ class APITestCase1(TestCase, BaseAPITestCase):
             "new_password2": "new_person"
         }
         self.post(self.password_change_url, data=new_password_payload,
-            status_code=400)
+                  status_code=400)
 
         # send empty payload
         self.post(self.password_change_url, data={}, status_code=400)
@@ -267,7 +550,7 @@ class APITestCase1(TestCase, BaseAPITestCase):
             "new_password2": "new_person"
         }
         self.post(self.password_change_url, data=new_password_payload,
-            status_code=400)
+                  status_code=400)
 
         new_password_payload = {
             "old_password": self.PASS,
@@ -275,7 +558,7 @@ class APITestCase1(TestCase, BaseAPITestCase):
             "new_password2": "new_person"
         }
         self.post(self.password_change_url, data=new_password_payload,
-            status_code=200)
+                  status_code=200)
 
         # user should not be able to login using old password
         self.post(self.login_url, data=login_payload, status_code=400)
@@ -379,10 +662,10 @@ class APITestCase1(TestCase, BaseAPITestCase):
 
         # test empty payload
         self.post(self.register_url, data={},
-            status_code=status.HTTP_400_BAD_REQUEST)
+                  status_code=status.HTTP_400_BAD_REQUEST)
 
         self.post(self.register_url, data=self.REGISTRATION_DATA_WITH_EMAIL,
-            status_code=status.HTTP_201_CREATED)
+                  status_code=status.HTTP_201_CREATED)
         self.assertEqual(User.objects.all().count(), user_count + 1)
         self.assertEqual(len(mail.outbox), mail_count + 1)
         new_user = get_user_model().objects.latest('id')
@@ -394,21 +677,20 @@ class APITestCase1(TestCase, BaseAPITestCase):
             "password": self.PASS
         }
         self.post(self.login_url, data=payload,
-            status=status.HTTP_400_BAD_REQUEST)
+                  status=status.HTTP_400_BAD_REQUEST)
 
         # veirfy email
-        email_confirmation = new_user.emailaddress_set.get(email=self.EMAIL)\
+        email_confirmation = new_user.emailaddress_set.get(email=self.EMAIL) \
             .emailconfirmation_set.order_by('-created')[0]
         self.post(self.veirfy_email_url, data={"key": email_confirmation.key},
-            status_code=status.HTTP_200_OK)
+                  status_code=status.HTTP_200_OK)
 
         # try to login again
         self._login()
         self._logout()
 
 
-class TestSocialAuth(TestCase, BaseAPITestCase):
-
+class TestSocialAuth(BaseAPITestCase):
     urls = 'rest_auth.test_urls'
 
     USERNAME = 'person'
@@ -438,7 +720,7 @@ class TestSocialAuth(TestCase, BaseAPITestCase):
     def test_failed_social_auth(self):
         # fake response
         responses.add(responses.GET, self.graph_api_url, body='', status=400,
-            content_type='application/json')
+                      content_type='application/json')
 
         payload = {
             'access_token': 'abc123'
@@ -450,7 +732,7 @@ class TestSocialAuth(TestCase, BaseAPITestCase):
         # fake response for facebook call
         resp_body = '{"id":"123123123123","first_name":"John","gender":"male","last_name":"Smith","link":"https:\\/\\/www.facebook.com\\/john.smith","locale":"en_US","name":"John Smith","timezone":2,"updated_time":"2014-08-13T10:14:38+0000","username":"john.smith","verified":true}'
         responses.add(responses.GET, self.graph_api_url, body=resp_body,
-            status=200, content_type='application/json')
+                      status=200, content_type='application/json')
 
         users_count = User.objects.all().count()
         payload = {
@@ -475,22 +757,22 @@ class TestSocialAuth(TestCase, BaseAPITestCase):
     def teste_edge_case(self):
         resp_body = '{"id":"123123123123","first_name":"John","gender":"male","last_name":"Smith","link":"https:\\/\\/www.facebook.com\\/john.smith","locale":"en_US","name":"John Smith","timezone":2,"updated_time":"2014-08-13T10:14:38+0000","username":"john.smith","verified":true,"email":"%s"}'
         responses.add(responses.GET, self.graph_api_url,
-            body=resp_body % self.EMAIL,
-            status=200, content_type='application/json')
+                      body=resp_body % self.EMAIL,
+                      status=200, content_type='application/json')
 
         # test empty payload
         self.post(self.register_url, data={}, status_code=400)
 
         self.post(self.register_url, data=self.REGISTRATION_DATA,
-            status_code=201)
+                  status_code=201)
         new_user = get_user_model().objects.latest('id')
         self.assertEqual(new_user.username, self.REGISTRATION_DATA['username'])
 
-        # veirfy email
-        email_confirmation = new_user.emailaddress_set.get(email=self.EMAIL)\
+        # verify email
+        email_confirmation = new_user.emailaddress_set.get(email=self.EMAIL) \
             .emailconfirmation_set.order_by('-created')[0]
         self.post(self.veirfy_email_url, data={"key": email_confirmation.key},
-            status_code=status.HTTP_200_OK)
+                  status_code=status.HTTP_200_OK)
 
         self._login()
         self._logout()
