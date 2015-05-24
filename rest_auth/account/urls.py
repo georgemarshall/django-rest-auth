@@ -9,10 +9,10 @@ urlpatterns = [
 
     url(r"^password/change/$", views.password_change,
         name="rest_change_password"),
-    # url(r"^password/set/$", views.password_set, name="rest_set_password"),
+    url(r"^password/set/$", views.password_set, name="rest_set_password"),
 
     # E-mail
-    # url(r"^email/$", views.email, name="rest_email"),
+    url(r"^email/$", views.email, name="rest_email"),
     url(r"^confirm-email/(?P<key>\w+)/$", views.confirm_email,
         name="rest_confirm_email"),
 

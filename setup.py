@@ -30,7 +30,6 @@ setup(
     install_requires=[
         'Django>=1.5.0',
         'djangorestframework>=3.0',
-        'six>=1.9.0',
     ],
     test_suite='runtests.runtests',
     include_package_data=True,

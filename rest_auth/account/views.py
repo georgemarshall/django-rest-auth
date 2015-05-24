@@ -16,42 +16,11 @@ from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_auth.app_settings import LoginSerializer, UserDetailsSerializer, ResetPasswordSerializer, \
-    ResetPasswordKeySerializer, ChangePasswordSerializer
-from rest_auth.serializers import LoginSerializer
+    ResetPasswordKeySerializer, ChangePasswordSerializer, SetPasswordSerializer
 from rest_auth.views import User
 
 
-class LoginView(GenericAPIView):
-    """
-    Check the credentials and return the REST Token
-    if the credentials are valid and authenticated.
-    Calls Django Auth login method to register User ID
-    in Django session framework
-
-    Accept the following POST parameters: username, password
-    Return the REST Framework Token Object's key.
-    """
-    throttle_classes = ()
-    permission_classes = (AllowAny,)
-    serializer_class = LoginSerializer
-
-    def post(self, request):
-        """
-        :type request: Request
-        :rtype: Response
-        """
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        user = serializer.validated_data['user']
-        token, created = Token.objects.get_or_create(user=user)
-        user_logged_in.send(sender=user.__class__, request=request, user=user)
-        return Response({'token': token.key})
-
-login = LoginView.as_view()
-
-
 class SignupView(APIView, AllauthSignupView):
-
     permission_classes = (AllowAny,)
     user_serializer_class = UserDetailsSerializer
     allowed_methods = ('POST', 'OPTIONS', 'HEAD')
@@ -93,21 +62,33 @@ class SignupView(APIView, AllauthSignupView):
 signup = SignupView.as_view()
 
 
-class ConfirmEmailView(APIView, AllauthConfirmEmailView):
+class LoginView(GenericAPIView):
+    """
+    Check the credentials and return the REST Token
+    if the credentials are valid and authenticated.
+    Calls Django Auth login method to register User ID
+    in Django session framework
 
+    Accept the following POST parameters: username, password
+    Return the REST Framework Token Object's key.
+    """
+    throttle_classes = ()
     permission_classes = (AllowAny,)
-    allowed_methods = ('POST', 'OPTIONS', 'HEAD')
+    serializer_class = LoginSerializer
 
-    def get(self, *args, **kwargs):
-        return Response({}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+    def post(self, request):
+        """
+        :type request: Request
+        :rtype: Response
+        """
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        user = serializer.validated_data['user']
+        token, created = Token.objects.get_or_create(user=user)
+        user_logged_in.send(sender=user.__class__, request=request, user=user)
+        return Response({'token': token.key})
 
-    def post(self, request, *args, **kwargs):
-        self.kwargs['key'] = self.request.DATA.get('key', '')
-        confirmation = self.get_object()
-        confirmation.confirm(self.request)
-        return Response({'message': 'ok'}, status=status.HTTP_200_OK)
-
-confirm_email = ConfirmEmailView.as_view()
+login = LoginView.as_view()
 
 
 class LogoutView(APIView):
@@ -139,14 +120,26 @@ logout = LogoutView.as_view()
 
 class PasswordChangeView(GenericAPIView):
     """
-    Calls Allauth ChangePasswordSerializer save method.
-
-    Accepts the following PUT parameters: oldpassword, password1, password2
+    Accepts the following POST parameters: [oldpassword,] password1, password2
     Returns the success/fail message.
     """
     throttle_classes = ()
     permission_classes = (IsAuthenticated,)
     serializer_class = ChangePasswordSerializer
+
+    def get_serializer_class(self):
+        """
+        Returns ``ChangePasswordSerializer`` if the user passes
+        ``has_usable_password`` otherwise we assume their account was created
+        via a social login and use ``SetPasswordSerializer``.
+
+        :rtype: ChangePasswordSerializer | SetPasswordSerializer
+        """
+        user = getattr(self.request, 'user')
+        if user.has_usable_password():
+            return ChangePasswordSerializer
+        else:
+            return SetPasswordSerializer
 
     def post(self, request):
         """
@@ -158,11 +151,41 @@ class PasswordChangeView(GenericAPIView):
         serializer.is_valid(raise_exception=True)
         serializer.save()
 
-        message = render_to_string('account/messages/password_changed.txt').strip()
-        signals.password_changed.send(sender=user.__class__, request=request, user=user)
-        return Response({"success": message})
+        if isinstance(serializer, ChangePasswordSerializer):
+            message = render_to_string('account/messages/password_changed.txt').strip()
+            signals.password_changed.send(sender=user.__class__, request=request, user=user)
+            return Response({"success": message})
+        elif isinstance(serializer, SetPasswordSerializer):
+            message = render_to_string('account/messages/password_set.txt').strip()
+            signals.password_set.send(sender=user.__class__, request=request, user=user)
+            return Response({"success": message})
 
 password_change = PasswordChangeView.as_view()
+password_set = PasswordChangeView.as_view()
+
+
+class EmailView(GenericAPIView):
+    pass
+
+email = EmailView.as_view()
+
+
+class ConfirmEmailView(APIView, AllauthConfirmEmailView):
+
+    permission_classes = (AllowAny,)
+    allowed_methods = ('POST', 'OPTIONS', 'HEAD')
+
+    def get(self, *args, **kwargs):
+        return Response({}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+
+    def post(self, request, *args, **kwargs):
+        self.kwargs['key'] = self.request.DATA.get('key', '')
+        confirmation = self.get_object()
+        confirmation.confirm(self.request)
+        return Response({'message': 'ok'}, status=status.HTTP_200_OK)
+
+
+confirm_email = ConfirmEmailView.as_view()
 
 
 class PasswordResetView(GenericAPIView):
@@ -244,6 +267,3 @@ class PasswordResetFromKeyView(GenericAPIView):
         return Response({"success": message})
 
 password_reset_from_key = PasswordResetFromKeyView.as_view()
-
-
-

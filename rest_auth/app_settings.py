@@ -1,12 +1,16 @@
 from django.conf import settings
 
-from .serializers import (
-    TokenSerializer as DefaultTokenSerializer,
+from .account.serializers import (
     UserDetailsSerializer as DefaultUserDetailsSerializer,
     LoginSerializer as DefaultLoginSerializer,
+    ChangePasswordSerializer as DefaultChangePasswordSerializer,
+    SetPasswordSerializer as DefaultSetPasswordSerializer,
     ResetPasswordSerializer as DefaultResetPasswordSerializer,
     ResetPasswordKeySerializer as DefaultPasswordResetConfirmSerializer,
-    ChangePasswordSerializer as DefaultPasswordChangeSerializer)
+)
+from .serializers import (
+    TokenSerializer as DefaultTokenSerializer,
+)
 from .utils import import_callable
 
 
@@ -33,5 +37,8 @@ ResetPasswordKeySerializer = import_callable(
 )
 
 ChangePasswordSerializer = import_callable(
-    serializers.get('PASSWORD_CHANGE_SERIALIZER', DefaultPasswordChangeSerializer)
+    serializers.get('PASSWORD_CHANGE_SERIALIZER', DefaultChangePasswordSerializer)
+)
+SetPasswordSerializer = import_callable(
+    serializers.get('PASSWORD_SET_SERIALIZER', DefaultSetPasswordSerializer)
 )
