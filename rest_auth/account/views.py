@@ -1,23 +1,26 @@
 from allauth.account import app_settings, signals
+from allauth.account.models import EmailAddress, EmailConfirmation
 from allauth.account.utils import complete_signup, url_str_to_user_pk
-from allauth.account.views import SignupView as AllauthSignupView, ConfirmEmailView as AllauthConfirmEmailView
-from django.contrib.auth import user_logged_in, user_logged_out
+from allauth.account.views import SignupView as AllauthSignupView
+from django.contrib.auth import get_user_model, user_logged_in, user_logged_out
 from django.contrib.auth.tokens import default_token_generator
 from django.http import HttpRequest
 from django.template.loader import render_to_string
 from django.utils.translation import ugettext_lazy as _
-from rest_framework import viewsets, status
+from rest_framework import status, viewsets
 from rest_framework.authtoken.models import Token
-from rest_framework.decorators import detail_route, list_route
+from rest_framework.decorators import detail_route
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.generics import GenericAPIView, get_object_or_404
 from rest_framework.permissions import AllowAny, IsAuthenticated
-from rest_framework.request import Request
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_auth.app_settings import LoginSerializer, UserDetailsSerializer, ResetPasswordSerializer, \
-    ResetPasswordKeySerializer, ChangePasswordSerializer, SetPasswordSerializer
-from rest_auth.views import User
+from rest_auth.app_settings import (
+    UserDetailsSerializer, LoginSerializer, ChangePasswordSerializer,
+    SetPasswordSerializer, EmailSerializer, ConfirmEmailSerializer,
+    ResetPasswordSerializer, ResetPasswordKeySerializer)
+
+User = get_user_model()
 
 
 class SignupView(APIView, AllauthSignupView):
@@ -78,8 +81,8 @@ class LoginView(GenericAPIView):
 
     def post(self, request):
         """
-        :type request: Request
-        :rtype: Response
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
         """
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -102,8 +105,8 @@ class LogoutView(APIView):
 
     def post(self, request):
         """
-        :type request: Request
-        :rtype: Response
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
         """
         message = render_to_string('account/messages/logged_out.txt').strip()
         user = getattr(request, 'user', None)
@@ -135,7 +138,7 @@ class PasswordChangeView(GenericAPIView):
 
         :rtype: ChangePasswordSerializer | SetPasswordSerializer
         """
-        user = getattr(self.request, 'user')
+        user = self.request.user
         if user.has_usable_password():
             return ChangePasswordSerializer
         else:
@@ -143,10 +146,10 @@ class PasswordChangeView(GenericAPIView):
 
     def post(self, request):
         """
-        :type request: Request
-        :rtype: Response
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
         """
-        user = getattr(request, 'user', None)
+        user = self.request.user
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         serializer.save()
@@ -154,36 +157,136 @@ class PasswordChangeView(GenericAPIView):
         if isinstance(serializer, ChangePasswordSerializer):
             message = render_to_string('account/messages/password_changed.txt').strip()
             signals.password_changed.send(sender=user.__class__, request=request, user=user)
-            return Response({"success": message})
+            return Response({'success': message})
         elif isinstance(serializer, SetPasswordSerializer):
             message = render_to_string('account/messages/password_set.txt').strip()
             signals.password_set.send(sender=user.__class__, request=request, user=user)
-            return Response({"success": message})
+            return Response({'success': message})
 
 password_change = PasswordChangeView.as_view()
 password_set = PasswordChangeView.as_view()
 
 
-class EmailView(GenericAPIView):
-    pass
+class EmailViewSet(viewsets.ModelViewSet):
+    permission_classes = (IsAuthenticated,)
+    serializer_class = EmailSerializer
 
-email = EmailView.as_view()
+    @detail_route(methods=['get'], description='testing')
+    def send(self, request, pk=None):
+        """
+        :type request: rest_framework.request.Request
+        :type pk: string
+        :rtype: rest_framework.response.Response
+        """
+        instance = self.get_object()
+        message = render_to_string('account/messages/email_confirmation_sent.txt',
+                                   {'email': instance.email}).strip()
+        instance.send_confirmation(request)
+        return Response({'info': message})
+
+    def get_queryset(self):
+        """
+        :rtype: django.db.models.query.QuerySet
+        """
+        user = self.request.user
+        return user.emailaddress_set.all()
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
+        """
+        instance = self.get_object()
+        if instance.primary:
+            message = render_to_string('account/messages/cannot_delete_primary_email.txt',
+                                       {'email': instance.email}).strip()
+            return Response({'error': message}, status.HTTP_400_BAD_REQUEST)
+        else:
+            self.perform_destroy(instance)
+            signals.email_removed.send(sender=request.user.__class__,
+                                       request=request,
+                                       user=request.user,
+                                       email_address=instance)
+            return Response(status=status.HTTP_204_NO_CONTENT)
+
+    def update(self, request, *args, **kwargs):
+        """
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
+        """
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+
+        if serializer._validated_data.get('primary'):
+            if (not serializer.instance.verified
+                and EmailAddress.objects.filter(
+                    user=request.user, verified=True).exists()):
+                message = render_to_string(
+                    'account/messages/unverified_primary_email.txt').strip()
+                return Response({'error': message}, status.HTTP_400_BAD_REQUEST)
+
+            try:
+                from_email_address = EmailAddress.objects.get(
+                    user=request.user, verified=True)
+            except EmailAddress.DoesNotExist:
+                from_email_address = None
+            serializer.instance.set_as_primary()
+            signals.email_changed.send(sender=request.user.__class__,
+                                       request=request,
+                                       user=request.user,
+                                       from_email_address=from_email_address,
+                                       to_email_address=serializer.instance)
+
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+email_list = EmailViewSet.as_view({
+    'get': 'list',
+    'post': 'create',
+})
+email_detail = EmailViewSet.as_view({
+    'get': 'retrieve',
+    'put': 'update',
+    'patch': 'partial_update',
+    'delete': 'destroy',
+})
+email_detail_send = EmailViewSet.as_view({
+    'get': 'send',
+})
 
 
-class ConfirmEmailView(APIView, AllauthConfirmEmailView):
-
+class ConfirmEmailView(GenericAPIView):
     permission_classes = (AllowAny,)
-    allowed_methods = ('POST', 'OPTIONS', 'HEAD')
+    serializer_class = ConfirmEmailSerializer
 
-    def get(self, *args, **kwargs):
-        return Response({}, status=status.HTTP_405_METHOD_NOT_ALLOWED)
+    queryset = EmailConfirmation.objects.all_valid().select_related('email_address__user')
+    lookup_field = 'key'
+
+    def get(self, request, *args, **kwargs):
+        """
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
+        """
+        if app_settings.CONFIRM_EMAIL_ON_GET:
+            return self.post(request, *args, **kwargs)
+
+        instance = self.get_object()
+        serializer = self.get_serializer(instance)
+        return Response(serializer.data)
 
     def post(self, request, *args, **kwargs):
-        self.kwargs['key'] = self.request.DATA.get('key', '')
-        confirmation = self.get_object()
-        confirmation.confirm(self.request)
-        return Response({'message': 'ok'}, status=status.HTTP_200_OK)
+        """
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
+        """
+        instance = self.get_object()
+        instance.confirm(request)
 
+        message = render_to_string('account/messages/email_confirmed.txt', {
+            'email': instance.email_address.email}).strip()
+        return Response({'success': message})
 
 confirm_email = ConfirmEmailView.as_view()
 
@@ -200,8 +303,8 @@ class PasswordResetView(GenericAPIView):
 
     def post(self, request, *args, **kwargs):
         """
-        :type request: Request
-        :rtype: Response
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
         """
         # Create a serializer with request.data
         serializer = self.get_serializer(data=request.data)
@@ -209,8 +312,8 @@ class PasswordResetView(GenericAPIView):
         serializer.save()
         # Return the success message with OK HTTP status
         return Response({'success': _(
-            "We have sent you an e-mail. Please contact us if you do not "
-            "receive it within a few minutes.")})
+            'We have sent you an e-mail. Please contact us if you do not '
+            'receive it within a few minutes.')})
 
 password_reset = PasswordResetView.as_view()
 
@@ -240,22 +343,25 @@ class PasswordResetFromKeyView(GenericAPIView):
             raise NotFound
         return get_object_or_404(User, pk=pk)
 
-    def initial(self, request, uidb36, key, *args, **kwargs):
+    def initial(self, request, *args, **kwargs):
         """
-        :type request: Request
+        :type request: rest_framework.request.Request
         :type uidb36: string
         :type key: string
         :rtype: None
         """
-        super(PasswordResetFromKeyView, self).initial(request, uidb36, key, *args, **kwargs)
+        super(PasswordResetFromKeyView, self).initial(request, *args, **kwargs)
+
+        uidb36 = kwargs.get('uidb36')
+        key = kwargs.get('key')
         self.reset_user = self._get_user(uidb36)
         if not self.token_generator.check_token(self.reset_user, key):
-            raise PermissionDenied(_("Bad Token"))
+            raise PermissionDenied(_('Bad Token'))
 
     def post(self, request, *args, **kwargs):
         """
-        :type request: Request
-        :rtype: Response
+        :type request: rest_framework.request.Request
+        :rtype: rest_framework.response.Response
         """
         message = render_to_string('account/messages/password_changed.txt').strip()
         serializer = self.get_serializer(data=request.data)
@@ -264,6 +370,6 @@ class PasswordResetFromKeyView(GenericAPIView):
 
         signals.password_reset.send(sender=self.reset_user.__class__,
                                     request=request, user=self.reset_user)
-        return Response({"success": message})
+        return Response({'success': message})
 
 password_reset_from_key = PasswordResetFromKeyView.as_view()
