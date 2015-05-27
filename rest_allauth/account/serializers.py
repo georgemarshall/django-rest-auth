@@ -12,7 +12,7 @@ from django.utils.translation import pgettext, ugettext_lazy as _
 from rest_framework import serializers, exceptions
 from rest_framework.serializers import raise_errors_on_nested_writes
 
-from rest_auth.serializers import AuthenticationMethod, EmailVerificationMethod, UserSerializer
+from ..serializers import AuthenticationMethod, EmailVerificationMethod, UserSerializer
 
 
 class PasswordField(serializers.CharField):

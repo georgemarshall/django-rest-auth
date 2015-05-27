@@ -1,5 +1,5 @@
-from rest_auth.registration.serializers import SocialLoginSerializer
-from rest_auth.account.views import LoginView
+from ..registration.serializers import SocialLoginSerializer
+from ..account.views import LoginView
 
 
 class SocialLoginView(LoginView):

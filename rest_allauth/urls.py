@@ -15,5 +15,5 @@ from django.conf.urls import include, url
 # )
 
 urlpatterns = [
-    url(r'^', include('rest_auth.account.urls'))
+    url(r'^', include('rest_allauth.account.urls'))
 ]

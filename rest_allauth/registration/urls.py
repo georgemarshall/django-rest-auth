@@ -1,8 +1,7 @@
 from django.views.generic import TemplateView
 from django.conf.urls import patterns, url
 
-from .views import VerifyEmail
-from rest_auth.account.views import SignupView, ConfirmEmailView
+from ..account.views import SignupView, ConfirmEmailView
 
 urlpatterns = [
     url(r'^$', SignupView.as_view(), name='rest_register'),

@@ -66,8 +66,8 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework.authtoken',
 
-    'rest_auth',
-    'rest_auth.registration'
+    'rest_allauth',
+    'rest_allauth.registration'
 ]
 
 SECRET_KEY = "38dh*skf8sjfhs287dh&^hd8&3hdg*j2&sd"

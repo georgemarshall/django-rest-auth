@@ -16,7 +16,7 @@ def runtests():
     test_runner = TestRunner(verbosity=1, interactive=True)
     if hasattr(django, 'setup'):
         django.setup()
-    failures = test_runner.run_tests(['rest_auth'])
+    failures = test_runner.run_tests(['rest_allauth'])
     sys.exit(bool(failures))
 
 if __name__ == '__main__':

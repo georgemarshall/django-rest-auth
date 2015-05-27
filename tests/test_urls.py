@@ -4,8 +4,8 @@ from django.views.generic import TemplateView
 
 from allauth.socialaccount.providers.facebook.views import FacebookOAuth2Adapter
 
-from rest_auth.urls import urlpatterns
-from rest_auth.registration.views import SocialLoginView
+from rest_allauth.urls import urlpatterns
+from rest_allauth.registration.views import SocialLoginView
 
 
 class FacebookLogin(SocialLoginView):

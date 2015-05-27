@@ -14,7 +14,7 @@ from rest_framework.test import APITestCase
 # Include allauth.urls
 urlpatterns = [
     url(r'^allauth/', include('allauth.urls')),
-    url(r'^api/', include('rest_auth.urls')),
+    url(r'^api/', include('rest_allauth.urls')),
 ]
 
 User = get_user_model()

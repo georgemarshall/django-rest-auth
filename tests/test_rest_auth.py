@@ -126,7 +126,7 @@ class APIClientOld(Client):
 #  T E S T   H E R E
 # -----------------------
 class TestUserDetails(APITestCase):
-    urls = 'rest_auth.test_urls'
+    urls = 'rest_allauth.test_urls'
 
     def setUp(self):
         self.url = reverse('rest_user_details')
@@ -156,7 +156,7 @@ class TestUserDetails(APITestCase):
 
 
 class TestSocialLogin(APITestCase):
-    urls = 'rest_auth.test_urls'
+    urls = 'rest_allauth.test_urls'
 
     def setUp(self):
         self.url = reverse('fb_login')
